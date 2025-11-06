@@ -1,0 +1,18 @@
+<launch>
+  <!-- Allow passing a custom params YAML from the including launch -->
+  <arg name="params_file" default="$(find-pkg-share vdb_edt)/config/vdb_edt_params.yaml"/>
+  <arg name="namespace" default=""/>
+
+  <group>
+    <!-- Optional namespace -->
+    <push-ros-namespace namespace="$(var namespace)"/>
+
+    <node pkg="vdb_edt"
+          exec="vdb_edt_node"
+          name="vdb_map"
+          output="screen">
+      <!-- Load YAML parameters -->
+      <param from="$(var params_file)"/>
+    </node>
+  </group>
+</launch>
