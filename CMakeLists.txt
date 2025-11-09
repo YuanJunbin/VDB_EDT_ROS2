@@ -37,7 +37,11 @@ add_library(vdb_edt STATIC
   src/dynamicVDBEDT.cpp
   src/timing.cc
 )
-target_include_directories(vdb_edt PUBLIC include)
+# target_include_directories(vdb_edt PUBLIC include)
+target_include_directories(vdb_edt PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 target_link_libraries(vdb_edt PUBLIC OpenVDB::openvdb)
 target_compile_features(vdb_edt PUBLIC cxx_std_17)
 
@@ -64,6 +68,7 @@ ament_target_dependencies(vdb_edt_node
 
 # Install
 install(TARGETS vdb_edt vdb_edt_node
+  EXPORT export_vdb_edt
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -72,8 +77,12 @@ install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION include/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.h"
 )
-install(DIRECTORY launch
-        DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY config
-        DESTINATION share/${PROJECT_NAME})
+
+install(EXPORT export_vdb_edt
+  DESTINATION share/${PROJECT_NAME}/cmake
+)
+
+ament_export_dependencies(OpenVDB Eigen3)
+ament_export_targets(export_vdb_edt HAS_LIBRARY_TARGET)
+
 ament_package()
