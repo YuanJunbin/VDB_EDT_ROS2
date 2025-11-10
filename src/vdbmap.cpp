@@ -49,9 +49,41 @@ VDBMap::VDBMap()
       VIS_MAP_MAXX(+200.0), VIS_MAP_MAXY(+200.0), VIS_MAP_MAXZ(10.0), VIS_SLICE_LEVEL(2.0),
       msg_ready_(false), occu_update_count_(0), dist_update_count_(0)
 {
-    node_handle_ = std::make_shared<rclcpp::Node>("vdb_map");
+    node_handle_ = std::make_shared<rclcpp::Node>("vdb_map_node");
     node_name_ = get_node_name();
+    initialize();
+}
 
+VDBMap::VDBMap(const rclcpp::Node::SharedPtr &external_node)
+    : L_FREE(-0.13), L_OCCU(+1.01), L_THRESH(0.0), L_MIN(-2.0), L_MAX(+3.5), VOX_SIZE(0.2),
+      START_RANGE(0.0), SENSOR_RANGE(5.0), HIT_THICKNESS(1), VERSION(1),
+      MAX_UPDATE_DIST(20.0), EDT_UPDATE_DURATION(0.5), VIS_UPDATE_DURATION(10.0),
+      VIS_MAP_MINX(-200.0), VIS_MAP_MINY(-200.0), VIS_MAP_MINZ(-1.0),
+      VIS_MAP_MAXX(+200.0), VIS_MAP_MAXY(+200.0), VIS_MAP_MAXZ(10.0), VIS_SLICE_LEVEL(2.0),
+      msg_ready_(false), occu_update_count_(0), dist_update_count_(0)
+{
+    node_handle_ = external_node;
+    node_name_ = get_node_name();
+    initialize();
+}
+
+VDBMap::VDBMap(const rclcpp::Node::SharedPtr &external_node,
+               const std::shared_ptr<tf2_ros::Buffer> &external_tf_buffer)
+    : L_FREE(-0.13), L_OCCU(+1.01), L_THRESH(0.0), L_MIN(-2.0), L_MAX(+3.5), VOX_SIZE(0.2),
+      START_RANGE(0.0), SENSOR_RANGE(5.0), HIT_THICKNESS(1), VERSION(1),
+      MAX_UPDATE_DIST(20.0), EDT_UPDATE_DURATION(0.5), VIS_UPDATE_DURATION(10.0),
+      VIS_MAP_MINX(-200.0), VIS_MAP_MINY(-200.0), VIS_MAP_MINZ(-1.0),
+      VIS_MAP_MAXX(+200.0), VIS_MAP_MAXY(+200.0), VIS_MAP_MAXZ(10.0), VIS_SLICE_LEVEL(2.0),
+      msg_ready_(false), occu_update_count_(0), dist_update_count_(0)
+{
+    node_handle_ = external_node;
+    tf_buffer_ = external_tf_buffer;
+    node_name_ = get_node_name();
+    initialize();
+}
+
+void VDBMap::initialize()
+{
     setup_parameters();
     load_mapping_para();
 
@@ -70,19 +102,32 @@ VDBMap::VDBMap()
         0.0, 0.0, 0.0, 1.0;
 
     // TF2 buffer/listener
-    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_handle_->get_clock());
-    tf_buffer_->setCreateTimerInterface(std::make_shared<tf2_ros::CreateTimerROS>(node_handle_->get_node_base_interface(),
-                                                                                  node_handle_->get_node_timers_interface()));
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_handle_, true);
+    if (!tf_buffer_)
+    {
+        RCLCPP_INFO(node_handle_->get_logger(), "Creating tf buffer for vdb-edt.");
+        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_handle_->get_clock());
+        tf_buffer_->setCreateTimerInterface(std::make_shared<tf2_ros::CreateTimerROS>(node_handle_->get_node_base_interface(),
+                                                                                      node_handle_->get_node_timers_interface()));
+    }
+    if (!tf_listener_)
+    {
+        RCLCPP_INFO(node_handle_->get_logger(), "Creating tf listener for vdb-edt.");
+        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_handle_, true);
+    }
 
     // Publishers
     occu_vis_pub_ = node_handle_->create_publisher<sensor_msgs::msg::PointCloud2>("/occ_grid", 5);
     slice_vis_pub_ = node_handle_->create_publisher<visualization_msgs::msg::Marker>("/dist_slice", 5);
 
+    frontier_vis_pub = node_handle_->create_publisher<visualization_msgs::msg::Marker>("/frontier_vis", 5);
+
     // OpenVDB init & grids
     openvdb::initialize();
     grid_logocc_ = openvdb::FloatGrid::create(0.0);
     this->set_voxel_size(*grid_logocc_, VOX_SIZE);
+
+    grid_frontier_ = openvdb::BoolGrid::create(false);
+    grid_frontier_->setTransform(grid_logocc_->transform().copy());
 
     max_coor_dist_ = static_cast<int>(MAX_UPDATE_DIST / VOX_SIZE);
     max_coor_sqdist_ = max_coor_dist_ * max_coor_dist_;
@@ -108,6 +153,9 @@ VDBMap::VDBMap()
     update_vis_timer_ = node_handle_->create_wall_timer(
         std::chrono::duration<double>(VIS_UPDATE_DURATION),
         std::bind(&VDBMap::visualize_maps, this));
+    update_frontier_timer_ = node_handle_->create_wall_timer(
+        std::chrono::duration<double>(FRONTIER_UPDATE_DURATION),
+        std::bind(&VDBMap::update_frontier, this));
 
     // lady_and_cow dataset subscriptions
     lady_cow_cloud_sub_ = node_handle_->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -123,6 +171,7 @@ VDBMap::VDBMap()
     cloud_filter_ = std::make_unique<tf2_ros::MessageFilter<sensor_msgs::msg::PointCloud2>>(
         cloud_sub_mf_, *tf_buffer_, worldframeId, 200, node_handle_);
     cloud_filter_->registerCallback(std::bind(&VDBMap::cloud_callback, this, std::placeholders::_1));
+
     RCLCPP_INFO(node_handle_->get_logger(), "[%s] VDBMap initialized.", node_name_.c_str());
 }
 
@@ -138,7 +187,7 @@ VDBMap::~VDBMap()
 
 std::string VDBMap::get_node_name() const
 {
-    return node_handle_ ? node_handle_->get_name() : std::string("vdb_map");
+    return node_handle_ ? node_handle_->get_name() : std::string("vdb_map_default");
 }
 
 rclcpp::Node::SharedPtr VDBMap::get_node_handle() const
@@ -178,6 +227,8 @@ void VDBMap::setup_parameters()
     node_handle_->declare_parameter<int>("vdbedt_version", VERSION);
     node_handle_->declare_parameter<double>("max_update_dist", MAX_UPDATE_DIST);
     node_handle_->declare_parameter<double>("edt_update_duration", EDT_UPDATE_DURATION);
+
+    node_handle_->declare_parameter<double>("frontier_update_duration", 2.0);
 
     node_handle_->declare_parameter<double>("vis_update_duration", VIS_UPDATE_DURATION);
     node_handle_->declare_parameter<double>("vis_slice_level", VIS_SLICE_LEVEL);
@@ -257,6 +308,7 @@ bool VDBMap::load_mapping_para()
     report_int("vdbedt_version", VERSION);
     report_double("max_update_dist", MAX_UPDATE_DIST);
     report_double("edt_update_duration", EDT_UPDATE_DURATION);
+    report_double("frontier_update_duration", FRONTIER_UPDATE_DURATION);
     report_double("vis_update_duration", VIS_UPDATE_DURATION);
     report_double("vis_slice_level", VIS_SLICE_LEVEL);
     report_double("vis_map_minx", VIS_MAP_MINX);
@@ -623,23 +675,6 @@ void VDBMap::update_edtmap()
 ////////////////////////////////////////////////////////////////////////////////
 // Occupancy update (ray casting)
 
-struct CoordHash
-{
-    std::size_t operator()(const openvdb::Coord &c) const noexcept
-    {
-        std::uint64_t h = 0xCBF29CE484222325ull;
-        auto mix = [&](int v)
-        {
-            std::uint64_t x = static_cast<std::uint32_t>(v);
-            h ^= x + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-        };
-        mix(c.x());
-        mix(c.y());
-        mix(c.z());
-        return static_cast<std::size_t>(h);
-    }
-};
-
 void VDBMap::update_occmap(openvdb::FloatGrid::Ptr grid_map,
                            const Eigen::Vector3d &origin,
                            std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> xyz)
@@ -647,6 +682,9 @@ void VDBMap::update_occmap(openvdb::FloatGrid::Ptr grid_map,
     // Accumulate log-odds deltas per voxel (no grid access here).
     std::unordered_map<openvdb::Coord, float, CoordHash> ll_delta;
     ll_delta.reserve(xyz->size() * 8);
+
+    // potential new frontiers
+    std::unordered_set<openvdb::Coord, CoordHash> patch_local;
 
     const openvdb::Vec3d origin_ijk =
         grid_map->worldToIndex(openvdb::Vec3d(origin.x(), origin.y(), origin.z()));
@@ -724,25 +762,37 @@ void VDBMap::update_occmap(openvdb::FloatGrid::Ptr grid_map,
                     openvdb::Coord c = ijk; // unknown -> occupied
                     grid_distance_->setObstacle(c);
                 }
-                continue;
             }
-
-            const bool wasOcc = (ll_old >= occ_thresh);
-            const bool nowOcc = (ll_new >= occ_thresh);
-
-            acc.setValueOn(ijk, ll_new);
-
-            if (!wasOcc && nowOcc)
+            else
             {
-                openvdb::Coord c = ijk; // free -> occupied
-                grid_distance_->setObstacle(c);
+                const bool wasOcc = (ll_old >= occ_thresh);
+                const bool nowOcc = (ll_new >= occ_thresh);
+
+                acc.setValueOn(ijk, ll_new);
+
+                if (!wasOcc && nowOcc)
+                {
+                    openvdb::Coord c = ijk; // free -> occupied
+                    grid_distance_->setObstacle(c);
+                }
+                else if (wasOcc && !nowOcc)
+                {
+                    openvdb::Coord c = ijk; // occupied -> free
+                    grid_distance_->removeObstacle(c);
+                }
             }
-            else if (wasOcc && !nowOcc)
+            const bool nowFree = (ll_new < occ_thresh);
+            const bool wasFree = (known && ll_old < occ_thresh);
+            if (nowFree && !wasFree)
             {
-                openvdb::Coord c = ijk; // occupied -> free
-                grid_distance_->removeObstacle(c);
+                patch_local.insert(ijk); // potential new frontier must be new free (unknown->free or occ->free)
             }
         }
+    } // map_mutex release
+    if (!patch_local.empty())
+    {
+        std::lock_guard<std::mutex> slk(swap_lock);
+        patch_write->insert(patch_local.begin(), patch_local.end());
     }
 }
 
@@ -818,6 +868,152 @@ void VDBMap::update_occmap(openvdb::FloatGrid::Ptr grid_map,
 //         } // process obstacle
 //     } // end inserting
 // }
+
+////////////////////////////////////////////////////////////////////////////////
+// Frontier Extraction
+void VDBMap::update_frontier()
+{
+    std::vector<openvdb::Coord> to_off;
+    std::vector<openvdb::Coord> to_on;
+    const float occ_thresh = static_cast<float>(L_THRESH);
+
+    UpdatedArea snap;
+    {
+        std::lock_guard<std::mutex> g(swap_lock);
+        std::swap(patch_write, patch_read);
+        snap = std::move(*patch_read);
+    }
+
+    {
+        std::shared_lock<std::shared_mutex> rlk(map_mutex);
+        openvdb::FloatGrid::ConstAccessor occgrid_acc = grid_logocc_->getConstAccessor(); // read only
+
+        // Check current frontiers: still frontier?
+        for (auto it = grid_frontier_->cbeginValueOn(); it; ++it)
+        {
+            const openvdb::Coord ijk = it.getCoord();
+            // if (!check_frontier_6(occgrid_acc, ijk))
+            if (!check_surface_frontier_6(occgrid_acc, ijk))
+            {
+                to_off.push_back(ijk);
+            }
+        }
+
+        // Check accumulated patch: new frontier?
+        to_on.reserve(snap.size());
+        for (const auto &ijk : snap)
+        {
+            float v;
+            if (!(occgrid_acc.probeValue(ijk, v) && v < occ_thresh))
+            {
+                continue;
+            }
+            // if (check_frontier_6(occgrid_acc, ijk))
+            if (check_surface_frontier_6(occgrid_acc, ijk))
+            {
+                to_on.push_back(ijk);
+            }
+        }
+    }
+
+    openvdb::BoolGrid::Accessor frontier_acc = grid_frontier_->getAccessor();
+    for (const auto &ijk : to_off)
+    {
+        frontier_acc.setValueOff(ijk, false);
+    }
+    for (const auto &ijk : to_on)
+    {
+        frontier_acc.setValueOn(ijk, true);
+    }
+
+    vis_frontier();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Frontier Visualization
+void VDBMap::vis_frontier()
+{
+    visualization_msgs::msg::Marker frontier_marker_msg;
+    generate_frontier_marker(grid_frontier_, worldframeId, frontier_marker_msg);
+    frontier_vis_pub->publish(frontier_marker_msg);
+}
+
+void VDBMap::frontier_to_pcl(openvdb::BoolGrid::ConstPtr grid,
+                             std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> &pc_out)
+{
+    pcl::PointXYZ point_xyz;
+
+    using itr_type = openvdb::BoolGrid::ValueOnCIter;
+
+    const openvdb::math::Transform &grid_tf(grid->transform());
+
+    for (itr_type itr = grid->cbeginValueOn(); itr.test(); ++itr)
+    {
+        if (!itr.isVoxelValue())
+            continue;
+
+        openvdb::Coord ijk = itr.getCoord();
+        openvdb::Vec3d p = grid_tf.indexToWorld(ijk);
+
+        point_xyz.x = static_cast<float>(p.x());
+        point_xyz.y = static_cast<float>(p.y());
+        point_xyz.z = static_cast<float>(p.z());
+        pc_out->points.push_back(point_xyz);
+    }
+    pc_out->width = static_cast<uint32_t>(pc_out->points.size());
+    pc_out->height = 1;
+}
+
+void VDBMap::generate_frontier_marker(const openvdb::BoolGrid::Ptr &grid,
+                                      const std::string &frame_id,
+                                      visualization_msgs::msg::Marker &marker_msg)
+{
+    marker_msg.header.frame_id = frame_id;
+    marker_msg.header.stamp = node_handle_->now();
+    marker_msg.ns = "vdb_grid";
+    marker_msg.id = 0;
+    marker_msg.type = visualization_msgs::msg::Marker::CUBE_LIST;
+    marker_msg.action = visualization_msgs::msg::Marker::ADD;
+    marker_msg.pose.orientation.w = 1.0;
+    marker_msg.color.a = 1.0;
+    marker_msg.frame_locked = true;
+
+    double voxel_size = grid->voxelSize()[0];
+    marker_msg.scale.x = voxel_size;
+    marker_msg.scale.y = voxel_size;
+    marker_msg.scale.z = voxel_size;
+
+    openvdb::CoordBBox bbox = grid->evalActiveVoxelBoundingBox();
+
+    for (auto iter = grid->cbeginValueOn(); iter; ++iter)
+    {
+        if (!iter.getValue())
+        {
+            continue;
+        }
+
+        openvdb::Vec3d world = grid->indexToWorld(iter.getCoord());
+
+        geometry_msgs::msg::Point pt;
+        pt.x = world.x();
+        pt.y = world.y();
+        pt.z = world.z();
+
+        std_msgs::msg::ColorRGBA color;
+        color.r = 1.0;
+        color.g = 0.0;
+        color.b = 0.0;
+        color.a = 0.3;
+
+        marker_msg.points.push_back(pt);
+        marker_msg.colors.push_back(color);
+    }
+
+    if (marker_msg.points.empty())
+    {
+        marker_msg.action = visualization_msgs::msg::Marker::DELETE;
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Slice visualization helpers

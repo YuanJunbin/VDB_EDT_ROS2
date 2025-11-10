@@ -19,6 +19,7 @@ vdb_map:
     vdbedt_version: 1
     max_update_dist: 20.0
     edt_update_duration: 0.5
+    frontier_update_duration: 2.0
     vis_update_duration: 5.0
     vis_slice_level: 2.5
 
