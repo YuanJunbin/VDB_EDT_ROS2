@@ -36,6 +36,8 @@ include_directories(
 add_library(vdb_edt STATIC
   src/dynamicVDBEDT.cpp
   src/timing.cc
+  src/vdbmap.cpp
+  src/frontier_cluster.cpp
 )
 # target_include_directories(vdb_edt PUBLIC include)
 target_include_directories(vdb_edt PUBLIC
@@ -43,11 +45,24 @@ target_include_directories(vdb_edt PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(vdb_edt PUBLIC OpenVDB::openvdb)
-target_compile_features(vdb_edt PUBLIC cxx_std_17)
+
+ament_target_dependencies(vdb_edt PUBLIC
+  rclcpp
+  tf2_ros
+  tf2_sensor_msgs
+  tf2_geometry_msgs
+  tf2_eigen
+  message_filters
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  std_msgs
+  pcl_conversions
+  Eigen3
+)
 
 add_executable(vdb_edt_node
   src/vdb_edt_node.cpp
-  src/vdbmap.cpp
 )
 target_link_libraries(vdb_edt_node
   vdb_edt
@@ -66,17 +81,24 @@ ament_target_dependencies(vdb_edt_node
   pcl_conversions
 )
 
-# Install
-install(TARGETS vdb_edt vdb_edt_node
+# Install library
+install(TARGETS vdb_edt
   EXPORT export_vdb_edt
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install executable, cannot install with library, otherwise adding exec as depend will cause build error
+install(TARGETS vdb_edt_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION include/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.h"
+  FILES_MATCHING 
+    PATTERN "*.h"
+    PATTERN "*.hxx"
 )
 
 install(DIRECTORY
@@ -93,5 +115,6 @@ install(EXPORT export_vdb_edt
 
 ament_export_dependencies(OpenVDB Eigen3)
 ament_export_targets(export_vdb_edt HAS_LIBRARY_TARGET)
-
+ament_export_include_directories(include)
+ament_export_libraries(vdb_edt)
 ament_package()

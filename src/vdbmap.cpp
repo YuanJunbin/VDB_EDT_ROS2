@@ -68,7 +68,8 @@ VDBMap::VDBMap(const rclcpp::Node::SharedPtr &external_node)
 }
 
 VDBMap::VDBMap(const rclcpp::Node::SharedPtr &external_node,
-               const std::shared_ptr<tf2_ros::Buffer> &external_tf_buffer)
+               const std::shared_ptr<tf2_ros::Buffer> &external_tf_buffer,
+               const std::shared_ptr<tf2_ros::TransformListener> &external_tf_listener)
     : L_FREE(-0.13), L_OCCU(+1.01), L_THRESH(0.0), L_MIN(-2.0), L_MAX(+3.5), VOX_SIZE(0.2),
       START_RANGE(0.0), SENSOR_RANGE(5.0), HIT_THICKNESS(1), VERSION(1),
       MAX_UPDATE_DIST(20.0), EDT_UPDATE_DURATION(0.5), VIS_UPDATE_DURATION(10.0),
@@ -78,14 +79,20 @@ VDBMap::VDBMap(const rclcpp::Node::SharedPtr &external_node,
 {
     node_handle_ = external_node;
     tf_buffer_ = external_tf_buffer;
+    tf_listener_ = external_tf_listener;
     node_name_ = get_node_name();
     initialize();
 }
 
 void VDBMap::initialize()
 {
+    RCLCPP_INFO(node_handle_->get_logger(), "Initializing vdb-edt.");
     setup_parameters();
+    RCLCPP_INFO(node_handle_->get_logger(), "Finished param setup.");
     load_mapping_para();
+    RCLCPP_INFO(node_handle_->get_logger(), "Finished loading mapping param.");
+
+    last_timing_print_ = node_handle_->now();
 
     // LADY_AND_COW dataset transforms
     ref_transform_ << 1, 0, 0, 0,
@@ -108,11 +115,9 @@ void VDBMap::initialize()
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_handle_->get_clock());
         tf_buffer_->setCreateTimerInterface(std::make_shared<tf2_ros::CreateTimerROS>(node_handle_->get_node_base_interface(),
                                                                                       node_handle_->get_node_timers_interface()));
-    }
-    if (!tf_listener_)
-    {
+
         RCLCPP_INFO(node_handle_->get_logger(), "Creating tf listener for vdb-edt.");
-        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_handle_, true);
+        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_handle_, false);
     }
 
     // Publishers
@@ -169,7 +174,7 @@ void VDBMap::initialize()
     // General synced dataset via message_filters + tf2 MessageFilter
     cloud_sub_mf_.subscribe(node_handle_.get(), pcl_topic, rclcpp::SensorDataQoS().get_rmw_qos_profile());
     cloud_filter_ = std::make_unique<tf2_ros::MessageFilter<sensor_msgs::msg::PointCloud2>>(
-        cloud_sub_mf_, *tf_buffer_, worldframeId, 200, node_handle_);
+        cloud_sub_mf_, *tf_buffer_, worldframeId, 500, node_handle_);
     cloud_filter_->registerCallback(std::bind(&VDBMap::cloud_callback, this, std::placeholders::_1));
 
     RCLCPP_INFO(node_handle_->get_logger(), "[%s] VDBMap initialized.", node_name_.c_str());
@@ -212,6 +217,7 @@ void VDBMap::setup_parameters()
     node_handle_->declare_parameter<std::string>("pcl_topic", "/robot_1/sensors/ouster/point_cloud");
     node_handle_->declare_parameter<std::string>("world_frame_id", "map");
     node_handle_->declare_parameter<std::string>("robot_frame_id", "base_link");
+    node_handle_->declare_parameter<std::string>("lidar_frame_id", "ouster");
     node_handle_->declare_parameter<std::string>("data_set", "shimizu");
 
     node_handle_->declare_parameter<double>("l_free", L_FREE);
@@ -272,6 +278,12 @@ bool VDBMap::load_mapping_para()
     {
         RCLCPP_ERROR(log, "Please set input robot frame id before running the node.");
         return false;
+    }
+
+    std::string dataset_name;
+    if (node_handle_->get_parameter("data_set", dataset_name))
+    {
+        RCLCPP_INFO(log, "config source: %s.", dataset_name.c_str());
     }
 
     auto report_double = [&](const char *name, double &var)
@@ -369,11 +381,20 @@ void VDBMap::cloud_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
 
     // update float occupancy map
     occu_update_count_++;
-    std::cout << "Running " << occu_update_count_ << " updates." << std::endl;
+    // std::cout << "Running " << occu_update_count_ << " updates." << std::endl;
+
     timing::Timer update_OCC_timer("UpdateOccu");
     this->update_occmap(grid_logocc_, origin_, xyz);
     update_OCC_timer.Stop();
-    timing::Timing::Print(std::cout);
+
+    // timing::Timing::Print(std::cout);
+    const auto now = node_handle_->now();
+    if ((now - last_timing_print_).seconds() >= 1.0)
+    {
+        RCLCPP_INFO(node_handle_->get_logger(), "%s",
+                    timing::Timing::Print().c_str());
+        last_timing_print_ = now;
+    }
     msg_ready_ = true;
 }
 
@@ -884,14 +905,33 @@ void VDBMap::update_frontier()
         snap = std::move(*patch_read);
     }
 
+    // Nothing to update
+    if (snap.empty())
+    {
+        return;
+    }
+
+    auto c_it = snap.begin();
+    openvdb::CoordBBox update_box(*c_it, *c_it);
+
+    for (++c_it; c_it != snap.end(); ++c_it)
+    {
+        update_box.expand(*c_it);
+    }
+
     {
         std::shared_lock<std::shared_mutex> rlk(map_mutex);
         openvdb::FloatGrid::ConstAccessor occgrid_acc = grid_logocc_->getConstAccessor(); // read only
 
         // Check current frontiers: still frontier?
-        for (auto it = grid_frontier_->cbeginValueOn(); it; ++it)
+
+        for (auto iter = grid_frontier_->cbeginValueOn(); iter; ++iter)
         {
-            const openvdb::Coord ijk = it.getCoord();
+            if (!iter.isVoxelValue() || !update_box.isInside(iter.getCoord()))
+            {
+                continue;
+            }
+            const openvdb::Coord ijk = iter.getCoord();
             // if (!check_frontier_6(occgrid_acc, ijk))
             if (!check_surface_frontier_6(occgrid_acc, ijk))
             {

@@ -83,6 +83,8 @@
 #include "vdb_edt/dynamicVDBEDT.h"
 #include "vdb_edt/timing.h"
 
+#include "vdb_edt/frontier_cluster.h"
+
 // Prefer constexpr over macro for compile-time constants.
 static constexpr int kPoseQueueSize = 20;
 
@@ -93,7 +95,8 @@ public:
     VDBMap();
     VDBMap(const rclcpp::Node::SharedPtr &external_node);
     VDBMap(const rclcpp::Node::SharedPtr &external_node,
-           const std::shared_ptr<tf2_ros::Buffer> &external_tf_buffer);
+           const std::shared_ptr<tf2_ros::Buffer> &external_tf_buffer,
+           const std::shared_ptr<tf2_ros::TransformListener> &external_tf_listener);
     ~VDBMap();
 
 private:
@@ -121,6 +124,8 @@ private:
     std::string node_name_;
     // ROS2: keep a single rclcpp node. No private node handle is needed.
     rclcpp::Node::SharedPtr node_handle_;
+
+    rclcpp::Time last_timing_print_;
 
 public:
     std::string get_node_name() const;
@@ -227,8 +232,10 @@ private: // distance map
     void get_slice_marker(visualization_msgs::msg::Marker &marker, int marker_id,
                           double slice, double max_sqdist);
 
-private: // frontier map
+public: // frontier map
     openvdb::BoolGrid::Ptr grid_frontier_;
+
+private:
     rclcpp::TimerBase::SharedPtr update_frontier_timer_;
     void update_frontier();
 
