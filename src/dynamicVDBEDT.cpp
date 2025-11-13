@@ -69,7 +69,7 @@ void DynamicVDBEDT::initialize(EDTGrid::Ptr& dist_map, float vox_size, int versi
     }
 }
 
-double DynamicVDBEDT::query_sq_distance(const openvdb::Coord &target)
+double DynamicVDBEDT::query_sq_distance(const openvdb::Coord &target) const
 {
     dataCell cell;
     bool known = dist_acc_->probeValue(target, cell);
@@ -79,7 +79,7 @@ double DynamicVDBEDT::query_sq_distance(const openvdb::Coord &target)
     return cell.dist();
 }
 
-double DynamicVDBEDT::query_sq_distance(const openvdb::Coord &target, openvdb::Coord &obst)
+double DynamicVDBEDT::query_sq_distance(const openvdb::Coord &target, openvdb::Coord &obst) const
 {
     dataCell cell;
     bool known = dist_acc_->probeValue(target, cell);

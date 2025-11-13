@@ -234,8 +234,10 @@ private: // distance map
 
 public: // frontier map
     openvdb::BoolGrid::Ptr grid_frontier_;
+    FrontierManager frontier_manager_;
 
 private:
+    void initialize_frontier_manager();
     rclcpp::TimerBase::SharedPtr update_frontier_timer_;
     void update_frontier();
 

@@ -61,8 +61,8 @@ public:
   void initialize(EDTGrid::Ptr& dist_map, float vox_size, int version);
 
   // return distance and the nearest obstacle
-  double query_sq_distance(const openvdb::Coord& target);
-  double query_sq_distance(const openvdb::Coord& target, openvdb::Coord& obst);
+  double query_sq_distance(const openvdb::Coord& target) const;
+  double query_sq_distance(const openvdb::Coord& target, openvdb::Coord& obst) const;
 
   // update distance map to reflect the changes
   void update();

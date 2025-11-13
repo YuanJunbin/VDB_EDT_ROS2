@@ -187,6 +187,11 @@ VDBMap::~VDBMap()
     tf_buffer_.reset();
 }
 
+void VDBMap::initialize_frontier_manager()
+{
+    frontier_manager_.initialize(grid_frontier_);
+}
+
 //////////////////////////////////////////////////////////////////////////////////
 // Node helpers
 
@@ -965,6 +970,15 @@ void VDBMap::update_frontier()
     {
         frontier_acc.setValueOn(ijk, true);
     }
+
+    openvdb::BoolGrid::ConstAccessor frontier_acc_read = grid_frontier_->getConstAccessor();
+    openvdb::FloatGrid::ConstAccessor occgrid_acc_read = grid_logocc_->getConstAccessor();
+    // Frontier Clustering
+    openvdb::CoordBBox expanded_box = frontier_manager_.expand_update_box(update_box, VOX_SIZE);
+    frontier_manager_.reset_changed_clusters(expanded_box, frontier_acc_read);
+    frontier_manager_.frontier_clustering(grid_frontier_, expanded_box);
+    frontier_manager_.compute_frontiers_to_visit(occgrid_acc_read, grid_distance_);
+    frontier_manager_.updateFrontierCostMatrix();
 
     vis_frontier();
 }

@@ -8,6 +8,36 @@
 
 #include <Eigen/Eigenvalues>
 
+FrontierManager::FrontierManager()
+    : min_cluster_size_(10),          // 一个 cluster 里至少 10 个体素
+      down_sample_rate_(2.0),         // 视点抽样：voxel_size * 2 做 VoxelGrid
+      cluster_size_xy_(3.0),          // XY 上超过 3m 就考虑 split
+
+      safe_robot_r_(0.5),             // EDT 安全距离
+      candidate_dphi_(M_PI / 8.0),    // 每 22.5 度采样一个 viewpoint
+      viewpoint_rmin_(0.5),           // viewpoint 离 frontier 中心最小半径
+      viewpoint_rmax_(2.0),           // 最大半径
+      candidate_rnum_(3),             // 半径上采 3 个圈
+      min_visib_num_(3),              // 至少看到 3 个 downsample 后 cell 才算有效视点
+
+      expand_x_(1.0),                 // 更新 box 周围再扩 5m 做 clustering
+      expand_y_(1.0),
+      expand_z_(1.0)
+{
+
+}
+
+void FrontierManager::initialize(openvdb::BoolGrid::Ptr& external_grid)
+{
+    grid_clustered_frontier_ = openvdb::BoolGrid::create(false);
+    first_new_cluster_ = frontiers_.end();
+
+    grid_clustered_frontier_->setTransform(external_grid->transform().copy());
+    const double voxel_size = external_grid->voxelSize()[0];
+    const double safe_index_dist = safe_robot_r_ / voxel_size;
+    safe_sq_dist_ = safe_index_dist * safe_index_dist;
+}
+
 openvdb::CoordBBox FrontierManager::expand_update_box(const openvdb::CoordBBox &update_box,
                                                       double voxel_size)
 {
@@ -112,6 +142,8 @@ void FrontierManager::frontier_clustering(const openvdb::BoolGrid::Ptr &grid_fro
             expand_frontier(ijk, frontier_acc, cluster_acc);
         }
     }
+
+    split_large_frontiers(tmp_frontiers_);
 }
 
 void FrontierManager::expand_frontier(const openvdb::Coord &seed,
@@ -358,4 +390,355 @@ bool FrontierManager::split_horizontally(const FrontierCluster &frontier,
     }
 
     return true;
+}
+
+bool FrontierManager::is_viewpoint_safe_edt(const Eigen::Vector3d &pos_world,
+                                            const DynamicVDBEDT &edt)
+{
+    const auto &tf = grid_clustered_frontier_->transform();
+    openvdb::Vec3d idx = tf.worldToIndex(openvdb::Vec3d(pos_world.x(),
+                                                        pos_world.y(),
+                                                        pos_world.z()));
+    openvdb::Coord ijk = openvdb::Coord::round(idx);
+
+    // EDT returns voxel^2 distance
+    double sq = edt.query_sq_distance(ijk);
+    if (sq < 0.0)
+    {
+        // no value, not safe
+        return false;
+    }
+
+    return (sq >= safe_sq_dist_);
+}
+
+void FrontierManager::compute_frontiers_to_visit(const openvdb::FloatGrid::ConstAccessor &occ_acc,
+                                                 const std::shared_ptr<DynamicVDBEDT> &dist_map)
+{
+    // Mark the postion of the first new cluster
+    first_new_cluster_ = frontiers_.end();
+    int new_num = 0, new_dormant = 0;
+
+    for (auto &tmp_ftr : tmp_frontiers_)
+    {
+        sample_viewpoints(tmp_ftr, occ_acc, dist_map);
+        if (!tmp_ftr.viewpoints_.empty())
+        {
+            ++new_num;
+            auto inserted = frontiers_.insert(frontiers_.end(), tmp_ftr);
+
+            // Put the best viewpoint in the front
+            std::sort(inserted->viewpoints_.begin(), inserted->viewpoints_.end(),
+                      [](const Viewpoint &a, const Viewpoint &b)
+                      { return a.visib_num_ > b.visib_num_; });
+
+            // Mark the first inserted cluster
+            if (first_new_cluster_ == frontiers_.end())
+            {
+                first_new_cluster_ = inserted;
+            }
+        }
+        else
+        {
+            dormant_frontiers_.push_back(tmp_ftr);
+            ++new_dormant;
+        }
+    }
+
+    int idx = 0;
+    for (auto &ft : frontiers_)
+    {
+        ft.id_ = idx++;
+    }
+
+    tmp_frontiers_.clear();
+}
+
+void FrontierManager::sample_viewpoints(FrontierCluster &frontier,
+                                        const openvdb::FloatGrid::ConstAccessor &occ_acc,
+                                        const std::shared_ptr<DynamicVDBEDT> &dist_map)
+{
+    frontier.viewpoints_.clear();
+
+    if (frontier.filtered_cells_.empty())
+    {
+        return;
+    }
+
+    const Eigen::Vector3d &avg = frontier.centroid_;
+
+    if (candidate_rnum_ <= 0)
+    {
+        return;
+    }
+
+    const double rmin = viewpoint_rmin_;
+    const double rmax = viewpoint_rmax_;
+    if (rmax < rmin)
+    {
+        return;
+    }
+
+    const double dr = (rmax - rmin) / static_cast<double>(candidate_rnum_);
+
+    for (double rc = rmin; rc <= rmax + 1e-3; rc += dr)
+    {
+        for (double phi = -M_PI; phi < M_PI; phi += candidate_dphi_)
+        {
+            const Eigen::Vector3d sample_pos = avg + rc * Eigen::Vector3d(std::cos(phi), std::sin(phi), 0.0);
+
+            // viewpoint itself is safe
+            if (!is_viewpoint_safe_edt(sample_pos, *dist_map))
+            {
+                continue;
+            }
+
+            // get avg
+            const auto &cells = frontier.filtered_cells_;
+            if (cells.empty())
+            {
+                continue;
+            }
+
+            Eigen::Vector3d ref_dir = (cells.front() - sample_pos).normalized();
+
+            double avg_yaw = 0.0;
+            for (size_t i = 1; i < cells.size(); ++i)
+            {
+                Eigen::Vector3d dir = (cells[i] - sample_pos).normalized();
+                double dotv = dir.dot(ref_dir);
+                if (dotv > 1.0)
+                {
+                    dotv = 1.0;
+                }
+                if (dotv < -1.0)
+                {
+                    dotv = -1.0;
+                }
+
+                double yaw = std::acos(dotv);
+                if (ref_dir.cross(dir).z() < 0.0)
+                {
+                    yaw = -yaw;
+                }
+                avg_yaw += yaw;
+            }
+
+            if (!cells.empty())
+            {
+                avg_yaw = avg_yaw / static_cast<double>(cells.size());
+            }
+            avg_yaw += std::atan2(ref_dir.y(), ref_dir.x());
+
+            // wrap [-pi, pi]
+            while (avg_yaw < -M_PI)
+            {
+                avg_yaw += 2.0 * M_PI;
+            }
+            while (avg_yaw > M_PI)
+            {
+                avg_yaw -= 2.0 * M_PI;
+            }
+
+            // 可见性计数
+            const int visib_num = count_visible_cells(sample_pos, cells, occ_acc);
+
+            if (visib_num > min_visib_num_)
+            {
+                Viewpoint vp;
+                vp.pos_ = sample_pos;
+                vp.yaw_ = avg_yaw;
+                vp.visib_num_ = visib_num;
+                frontier.viewpoints_.push_back(vp);
+            }
+            else
+            {
+                // 视点覆盖不足，忽略
+            }
+        }
+    }
+}
+
+int FrontierManager::count_visible_cells(
+    const Eigen::Vector3d& pos,
+    const std::vector<Eigen::Vector3d>& cluster_cells,
+    const openvdb::FloatGrid::ConstAccessor& occ_acc)
+{
+    double L_THRESH = 0;
+    int visib_num = 0;
+
+    // 使用 clustered frontier grid 的 transform（与你的 occ grid 对齐）
+    const openvdb::math::Transform& tf = grid_clustered_frontier_->transform();
+
+    const openvdb::Vec3d origin_w(pos.x(), pos.y(), pos.z());
+    const openvdb::Vec3d origin_ijk = tf.worldToIndex(origin_w);
+
+    const float occ_thresh = static_cast<float>(L_THRESH);  // 或者你自己的阈值成员
+
+    for (const auto& cell_w : cluster_cells)
+    {
+        // xyz - ijk
+        const openvdb::Vec3d target_w(cell_w.x(), cell_w.y(), cell_w.z());
+        openvdb::Vec3d target_ijk = tf.worldToIndex(target_w);
+
+        openvdb::Vec3d dir = target_ijk - origin_ijk;
+        const double len = dir.length();
+
+        if (len <= 1e-6)
+        {
+            ++visib_num;
+            continue;
+        }
+
+        dir.normalize();
+
+        // ray + DDA
+        openvdb::math::Ray<double> ray(origin_ijk, dir);
+        openvdb::math::DDA<openvdb::math::Ray<double>, 0> dda(
+            ray, 0.0, len);
+
+        bool visible = true;
+
+        // ray tracing
+        for (;;)
+        {
+            const openvdb::Coord ijk = dda.voxel();
+
+            float val = 0.0f;
+            const bool known = occ_acc.probeValue(ijk, val);
+
+            // unknown
+            if (!known)
+            {
+                visible = false;
+                break;
+            }
+
+            // occupied
+            if (val >= occ_thresh)
+            {
+                visible = false;
+                break;
+            }
+
+            dda.step();
+
+            if (!(dda.time() < dda.maxTime()))
+            {
+                break;
+            }
+        }
+
+        if (visible)
+        {
+            ++visib_num;
+        }
+    }
+
+    return visib_num;
+}
+
+void FrontierManager::updateFrontierCostMatrix()
+{
+    std::cout << "cost mat size before remove: " << std::endl;
+    for (auto &ftr : frontiers_)
+    {
+        std::cout << "(" << ftr.costs_.size() << "," << ftr.paths_.size() << "), ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "cost mat size remove: " << std::endl;
+    if (!removed_ids_.empty())
+    {
+        // 对所有“旧 frontier”（first_new_cluster_ 之前的）删掉被移除 cluster 对应的列
+        for (auto it = frontiers_.begin(); it != first_new_cluster_; ++it)
+        {
+            auto cost_iter = it->costs_.begin();
+            auto path_iter = it->paths_.begin();
+            int iter_idx = 0;
+
+            for (int rid : removed_ids_)
+            {
+                // move the iterator to the delete position
+                while (iter_idx < rid && cost_iter != it->costs_.end())
+                {
+                    ++cost_iter;
+                    ++path_iter;
+                    ++iter_idx;
+                }
+                if (cost_iter == it->costs_.end())
+                    break;
+
+                cost_iter = it->costs_.erase(cost_iter);
+                path_iter = it->paths_.erase(path_iter);
+                // 注意：这里不 ++iter_idx，因为 after erase, current position is still rid
+            }
+            std::cout << "(" << it->costs_.size() << "," << it->paths_.size() << "), ";
+        }
+        removed_ids_.clear();
+    }
+    std::cout << std::endl;
+
+    // 小工具：给两个 cluster 更新双向 cost / path
+    auto updateCost = [this](const std::list<FrontierCluster>::iterator &it1,
+                             const std::list<FrontierCluster>::iterator &it2)
+    {
+        std::cout << "(" << it1->id_ << "," << it2->id_ << "), ";
+
+        // Viewpoints first, if no viewpoints, use centroid
+        const Eigen::Vector3d p1 = it1->viewpoints_.empty()
+                                       ? it1->centroid_
+                                       : it1->viewpoints_.front().pos_;
+        const Eigen::Vector3d p2 = it2->viewpoints_.empty()
+                                       ? it2->centroid_
+                                       : it2->viewpoints_.front().pos_;
+
+        std::vector<Eigen::Vector3d> path_12;
+        double cost_12 = computeCost(p1, p2, path_12); // distance only
+
+        // it1 -> it2
+        it1->costs_.push_back(cost_12);
+        it1->paths_.push_back(path_12);
+
+        // it2 -> it1
+        std::reverse(path_12.begin(), path_12.end());
+        it2->costs_.push_back(cost_12);
+        it2->paths_.push_back(path_12);
+    };
+
+    // ========== old - new ==========
+    for (auto it_old = frontiers_.begin(); it_old != first_new_cluster_; ++it_old)
+    {
+        for (auto it_new = first_new_cluster_; it_new != frontiers_.end(); ++it_new)
+        {
+            updateCost(it_old, it_new);
+        }
+    }
+
+    // ========== new - new ==========
+    if (first_new_cluster_ != frontiers_.end())
+    {
+        for (auto it_i = first_new_cluster_; it_i != frontiers_.end(); ++it_i)
+        {
+            auto it_j = it_i;
+            ++it_j;
+            for (; it_j != frontiers_.end(); ++it_j)
+            {
+                updateCost(it_i, it_j);
+            }
+        }
+    }
+
+    std::cout << std::endl;
+}
+
+double FrontierManager::computeCost(const Eigen::Vector3d &p1,
+                                    const Eigen::Vector3d &p2,
+                                    std::vector<Eigen::Vector3d> &path)
+{
+    path.clear();
+    path.push_back(p1);
+    path.push_back(p2);
+
+    return (p2 - p1).norm();
 }

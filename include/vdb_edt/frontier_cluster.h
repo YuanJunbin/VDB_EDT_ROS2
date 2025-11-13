@@ -12,6 +12,15 @@
 #include <openvdb/math/DDA.h>
 #include <openvdb/math/Ray.h>
 
+#include "vdb_edt/dynamicVDBEDT.h"
+
+struct Viewpoint
+{
+    Eigen::Vector3d pos_;
+    double yaw_;
+    int visib_num_;
+};
+
 struct FrontierCluster
 {
     // Frontier voxels in the cluster
@@ -28,7 +37,7 @@ struct FrontierCluster
     int id_;
 
     // Viewpoints that can cover the cluster
-    // std::vector<Viewpoint> viewpoints_;
+    std::vector<Viewpoint> viewpoints_;
 
     // Bounding box of cluster, center & 1/2 side length
     Eigen::Vector3d box_min_, box_max_;
@@ -41,6 +50,10 @@ struct FrontierCluster
 
 class FrontierManager
 {
+public:
+    FrontierManager();
+    void initialize(openvdb::BoolGrid::Ptr &external_grid);
+
 private:
     std::list<FrontierCluster> frontiers_, dormant_frontiers_, tmp_frontiers_;
     openvdb::BoolGrid::Ptr grid_clustered_frontier_;
@@ -54,13 +67,18 @@ private:
 
     void unflag_changed_cluster(const FrontierCluster &cluster);
 
+public:
+    // Remove old
     void reset_changed_clusters(const openvdb::CoordBBox &expanded_box,
                                 const openvdb::BoolGrid::ConstAccessor &frontier_acc);
-    std::vector<int> removed_ids_;
 
     // Add new
     void frontier_clustering(const openvdb::BoolGrid::Ptr &grid_frontier,
                              const openvdb::CoordBBox &expanded_box);
+
+private:
+    std::vector<int> removed_ids_;
+
     void expand_frontier(const openvdb::Coord &seed,
                          openvdb::BoolGrid::ConstAccessor &frontier_acc,
                          openvdb::BoolGrid::Accessor &cluster_acc);
@@ -78,13 +96,43 @@ private:
                             std::list<FrontierCluster> &out_splits);
     // metric size threshold of a cluster, help determine split/merge
     double cluster_size_xy_;
-    
+
+public:
+    void compute_frontiers_to_visit(const openvdb::FloatGrid::ConstAccessor &occ_acc,
+                                    const std::shared_ptr<DynamicVDBEDT> &dist_map);
+
+private:
+    void sample_viewpoints(FrontierCluster &frontier,
+                           const openvdb::FloatGrid::ConstAccessor &occ_acc,
+                           const std::shared_ptr<DynamicVDBEDT> &dist_map);
+    int count_visible_cells(const Eigen::Vector3d &pos,
+                            const std::vector<Eigen::Vector3d> &cluster_cells,
+                            const openvdb::FloatGrid::ConstAccessor &occ_acc);
+
+    double computeCost(const Eigen::Vector3d &p1,
+                       const Eigen::Vector3d &p2,
+                       std::vector<Eigen::Vector3d> &path);
+
+    std::list<FrontierCluster>::iterator first_new_cluster_;
+
+    double safe_sq_dist_;
+    double safe_robot_r_;
+    double candidate_dphi_;
+    double viewpoint_rmin_, viewpoint_rmax_;
+
+    int candidate_rnum_;
+    int min_visib_num_;
 
 public:
     // Search box, expanded from update box
     openvdb::CoordBBox expand_update_box(const openvdb::CoordBBox &update_box,
                                          double voxel_size);
     double expand_x_, expand_y_, expand_z_;
+
+    bool is_viewpoint_safe_edt(const Eigen::Vector3d &pos_world,
+                               const DynamicVDBEDT &edt);
+
+    void updateFrontierCostMatrix();
 };
 
 #endif
