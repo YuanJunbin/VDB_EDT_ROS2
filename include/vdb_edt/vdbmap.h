@@ -57,6 +57,7 @@
 #include <tf2_ros/message_filter.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2/LinearMath/Quaternion.h>
 
 // NOTE(ROS2): doTransform for PointCloud2 lives in tf2_sensor_msgs (used in .cpp).
 // #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
@@ -66,6 +67,7 @@
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 
@@ -255,6 +257,11 @@ private:
     void frontier_to_pcl(openvdb::BoolGrid::ConstPtr grid,
                          std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> &pc_out);
 
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr frontier_cluster_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr viewpoints_pub_;
+    void vis_frontier_clusters();
+    void vis_frontier_viewpoints();
+
     inline bool check_frontier_6(const openvdb::FloatGrid::ConstAccessor &acc,
                                  const openvdb::Coord &ijk)
     {
@@ -299,6 +306,42 @@ private:
         for (int i = 0; i < 6; ++i)
         {
             const openvdb::Coord n = ijk.offsetBy(d6[i][0], d6[i][1], d6[i][2]);
+            float nv;
+            if (!acc.probeValue(n, nv))
+            {
+                has_unknown_neighbor = true; // has unknown neighbor
+            }
+            else if (nv > occ_thresh)
+            {
+                has_occ_neighbor = true;
+            }
+            if (has_unknown_neighbor && has_occ_neighbor)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline bool check_surface_frontier_26(const openvdb::FloatGrid::ConstAccessor &acc,
+                                         const openvdb::Coord &ijk)
+    {
+        const float occ_thresh = static_cast<float>(L_THRESH);
+        float v = 0.f;
+        if (!(acc.probeValue(ijk, v) && v < occ_thresh))
+        {
+            return false;
+        }
+
+        // 6-neighborhood offsets
+        static const int d26[26][3] = {{-1, -1, -1}, {-1, -1, 0}, {-1, -1, 1}, {-1, 0, -1}, {-1, 0, 0}, {-1, 0, 1}, {-1, 1, -1}, {-1, 1, 0}, {-1, 1, 1}, {0, -1, -1}, {0, -1, 0}, {0, -1, 1}, {0, 0, -1}, {0, 0, 1}, {0, 1, -1}, {0, 1, 0}, {0, 1, 1}, {1, -1, -1}, {1, -1, 0}, {1, -1, 1}, {1, 0, -1}, {1, 0, 0}, {1, 0, 1}, {1, 1, -1}, {1, 1, 0}, {1, 1, 1}};
+
+        bool has_unknown_neighbor = false;
+        bool has_occ_neighbor = false;
+
+        for (int i = 0; i < 26; ++i)
+        {
+            const openvdb::Coord n = ijk.offsetBy(d26[i][0], d26[i][1], d26[i][2]);
             float nv;
             if (!acc.probeValue(n, nv))
             {

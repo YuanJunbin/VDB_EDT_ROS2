@@ -9,25 +9,24 @@
 #include <Eigen/Eigenvalues>
 
 FrontierManager::FrontierManager()
-    : min_cluster_size_(10),          // 一个 cluster 里至少 10 个体素
-      down_sample_rate_(2.0),         // 视点抽样：voxel_size * 2 做 VoxelGrid
-      cluster_size_xy_(3.0),          // XY 上超过 3m 就考虑 split
+    : min_cluster_size_(10),  // 一个 cluster 里至少 10 个体素
+      down_sample_rate_(2.0), // 视点抽样：voxel_size * 2 做 VoxelGrid
+      cluster_size_xy_(3.0),  // XY 上超过 3m 就考虑 split
 
-      safe_robot_r_(0.5),             // EDT 安全距离
-      candidate_dphi_(M_PI / 8.0),    // 每 22.5 度采样一个 viewpoint
-      viewpoint_rmin_(0.5),           // viewpoint 离 frontier 中心最小半径
-      viewpoint_rmax_(2.0),           // 最大半径
-      candidate_rnum_(3),             // 半径上采 3 个圈
-      min_visib_num_(3),              // 至少看到 3 个 downsample 后 cell 才算有效视点
+      safe_robot_r_(0.8),          // EDT 安全距离
+      candidate_dphi_(M_PI / 8.0), // 每 22.5 度采样一个 viewpoint
+      viewpoint_rmin_(0.5),        // viewpoint 离 frontier 中心最小半径
+      viewpoint_rmax_(2.0),        // 最大半径
+      candidate_rnum_(3),          // 半径上采 3 个圈
+      min_visib_num_(3),           // 至少看到 3 个 downsample 后 cell 才算有效视点
 
-      expand_x_(1.0),                 // 更新 box 周围再扩 5m 做 clustering
+      expand_x_(1.0), // 更新 box 周围再扩 5m 做 clustering
       expand_y_(1.0),
       expand_z_(1.0)
 {
-
 }
 
-void FrontierManager::initialize(openvdb::BoolGrid::Ptr& external_grid)
+void FrontierManager::initialize(openvdb::BoolGrid::Ptr &external_grid)
 {
     grid_clustered_frontier_ = openvdb::BoolGrid::create(false);
     first_new_cluster_ = frontiers_.end();
@@ -560,22 +559,22 @@ void FrontierManager::sample_viewpoints(FrontierCluster &frontier,
 }
 
 int FrontierManager::count_visible_cells(
-    const Eigen::Vector3d& pos,
-    const std::vector<Eigen::Vector3d>& cluster_cells,
-    const openvdb::FloatGrid::ConstAccessor& occ_acc)
+    const Eigen::Vector3d &pos,
+    const std::vector<Eigen::Vector3d> &cluster_cells,
+    const openvdb::FloatGrid::ConstAccessor &occ_acc)
 {
     double L_THRESH = 0;
     int visib_num = 0;
 
     // 使用 clustered frontier grid 的 transform（与你的 occ grid 对齐）
-    const openvdb::math::Transform& tf = grid_clustered_frontier_->transform();
+    const openvdb::math::Transform &tf = grid_clustered_frontier_->transform();
 
     const openvdb::Vec3d origin_w(pos.x(), pos.y(), pos.z());
     const openvdb::Vec3d origin_ijk = tf.worldToIndex(origin_w);
 
-    const float occ_thresh = static_cast<float>(L_THRESH);  // 或者你自己的阈值成员
+    const float occ_thresh = static_cast<float>(L_THRESH); // 或者你自己的阈值成员
 
-    for (const auto& cell_w : cluster_cells)
+    for (const auto &cell_w : cluster_cells)
     {
         // xyz - ijk
         const openvdb::Vec3d target_w(cell_w.x(), cell_w.y(), cell_w.z());
@@ -638,7 +637,7 @@ int FrontierManager::count_visible_cells(
     return visib_num;
 }
 
-void FrontierManager::updateFrontierCostMatrix()
+void FrontierManager::update_frontier_cost_matrix()
 {
     std::cout << "cost mat size before remove: " << std::endl;
     for (auto &ftr : frontiers_)
@@ -741,4 +740,56 @@ double FrontierManager::computeCost(const Eigen::Vector3d &p1,
     path.push_back(p2);
 
     return (p2 - p1).norm();
+}
+
+void FrontierManager::clusters_to_pcl(pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_out)
+{
+    if (!cloud_out)
+    {
+        cloud_out.reset(new pcl::PointCloud<pcl::PointXYZI>());
+    }
+
+    cloud_out->clear();
+
+    // estimate vol
+    size_t total_pts = 0;
+    for (const auto &ftr : frontiers_)
+    {
+        total_pts += ftr.cells_.size();
+    }
+    cloud_out->points.reserve(total_pts);
+
+    for (const auto &ftr : frontiers_)
+    {
+        // id_ -> intensity，+1 to avoid all black for 0
+        const float intensity = static_cast<float>(ftr.id_ + 1);
+
+        for (const auto &p : ftr.cells_)
+        {
+            pcl::PointXYZI pt;
+            pt.x = static_cast<float>(p.x());
+            pt.y = static_cast<float>(p.y());
+            pt.z = static_cast<float>(p.z());
+            pt.intensity = intensity;
+            cloud_out->points.push_back(pt);
+        }
+    }
+
+    cloud_out->width = static_cast<uint32_t>(cloud_out->points.size());
+    cloud_out->height = 1;
+    cloud_out->is_dense = false;
+}
+
+void FrontierManager::export_viewpoints(std::vector<Viewpoint> &out) const
+{
+    out.clear();
+    out.reserve(frontiers_.size());
+
+    for (const auto &ftr : frontiers_)
+    {
+        if (!ftr.viewpoints_.empty())
+        {
+            out.push_back(ftr.viewpoints_.front());
+        }
+    }
 }

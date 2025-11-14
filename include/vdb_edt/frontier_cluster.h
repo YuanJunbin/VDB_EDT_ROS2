@@ -12,6 +12,9 @@
 #include <openvdb/math/DDA.h>
 #include <openvdb/math/Ray.h>
 
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+
 #include "vdb_edt/dynamicVDBEDT.h"
 
 struct Viewpoint
@@ -132,7 +135,11 @@ public:
     bool is_viewpoint_safe_edt(const Eigen::Vector3d &pos_world,
                                const DynamicVDBEDT &edt);
 
-    void updateFrontierCostMatrix();
+    void update_frontier_cost_matrix();
+
+    void clusters_to_pcl(pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud_out);
+    
+    void export_viewpoints(std::vector<Viewpoint>& out) const;
 };
 
 #endif

@@ -178,6 +178,9 @@ void VDBMap::initialize()
     cloud_filter_->registerCallback(std::bind(&VDBMap::cloud_callback, this, std::placeholders::_1));
 
     RCLCPP_INFO(node_handle_->get_logger(), "[%s] VDBMap initialized.", node_name_.c_str());
+
+    // Frontier manager
+    initialize_frontier_manager();
 }
 
 VDBMap::~VDBMap()
@@ -190,6 +193,10 @@ VDBMap::~VDBMap()
 void VDBMap::initialize_frontier_manager()
 {
     frontier_manager_.initialize(grid_frontier_);
+    frontier_cluster_pub_ = node_handle_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/frontier_clusters", 5);
+    viewpoints_pub_ = node_handle_->create_publisher<geometry_msgs::msg::PoseArray>(
+        "/frontier_viewpoints", 5);
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -938,7 +945,8 @@ void VDBMap::update_frontier()
             }
             const openvdb::Coord ijk = iter.getCoord();
             // if (!check_frontier_6(occgrid_acc, ijk))
-            if (!check_surface_frontier_6(occgrid_acc, ijk))
+            // if (!check_surface_frontier_6(occgrid_acc, ijk))
+            if (!check_surface_frontier_26(occgrid_acc, ijk))
             {
                 to_off.push_back(ijk);
             }
@@ -954,7 +962,8 @@ void VDBMap::update_frontier()
                 continue;
             }
             // if (check_frontier_6(occgrid_acc, ijk))
-            if (check_surface_frontier_6(occgrid_acc, ijk))
+            // if (check_surface_frontier_6(occgrid_acc, ijk))
+            if (check_surface_frontier_26(occgrid_acc, ijk))
             {
                 to_on.push_back(ijk);
             }
@@ -973,14 +982,22 @@ void VDBMap::update_frontier()
 
     openvdb::BoolGrid::ConstAccessor frontier_acc_read = grid_frontier_->getConstAccessor();
     openvdb::FloatGrid::ConstAccessor occgrid_acc_read = grid_logocc_->getConstAccessor();
+
     // Frontier Clustering
+    RCLCPP_INFO(node_handle_->get_logger(), "Start clustering.");
     openvdb::CoordBBox expanded_box = frontier_manager_.expand_update_box(update_box, VOX_SIZE);
     frontier_manager_.reset_changed_clusters(expanded_box, frontier_acc_read);
+    RCLCPP_INFO(node_handle_->get_logger(), "Reset changed clusters.");
     frontier_manager_.frontier_clustering(grid_frontier_, expanded_box);
+    RCLCPP_INFO(node_handle_->get_logger(), "Frontier clustered.");
     frontier_manager_.compute_frontiers_to_visit(occgrid_acc_read, grid_distance_);
-    frontier_manager_.updateFrontierCostMatrix();
+    RCLCPP_INFO(node_handle_->get_logger(), "viewpoints generated.");
+    frontier_manager_.update_frontier_cost_matrix();
+    RCLCPP_INFO(node_handle_->get_logger(), "Cost matrix updated.");
 
     vis_frontier();
+    vis_frontier_clusters();
+    vis_frontier_viewpoints();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1016,6 +1033,61 @@ void VDBMap::frontier_to_pcl(openvdb::BoolGrid::ConstPtr grid,
     }
     pc_out->width = static_cast<uint32_t>(pc_out->points.size());
     pc_out->height = 1;
+}
+
+void VDBMap::vis_frontier_clusters()
+{
+    if (!frontier_cluster_pub_ || frontier_cluster_pub_->get_subscription_count() == 0)
+    {
+        return;
+    }
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_xyzi(new pcl::PointCloud<pcl::PointXYZI>);
+    frontier_manager_.clusters_to_pcl(cloud_xyzi);
+
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(*cloud_xyzi, msg);
+    msg.header.frame_id = worldframeId; // 和你的 map/frame 对齐
+    msg.header.stamp = node_handle_->now();
+
+    frontier_cluster_pub_->publish(msg);
+}
+
+void VDBMap::vis_frontier_viewpoints()
+{
+    if (!viewpoints_pub_ || viewpoints_pub_->get_subscription_count() == 0)
+    {
+        return;
+    }
+
+    std::vector<Viewpoint> vps;
+    frontier_manager_.export_viewpoints(vps);
+
+    geometry_msgs::msg::PoseArray pa;
+    pa.header.frame_id = worldframeId;
+    pa.header.stamp = node_handle_->now();
+
+    pa.poses.reserve(vps.size());
+
+    for (const auto &vp : vps)
+    {
+        geometry_msgs::msg::Pose pose;
+        pose.position.x = vp.pos_.x();
+        pose.position.y = vp.pos_.y();
+        pose.position.z = vp.pos_.z();
+
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, vp.yaw_);
+
+        pose.orientation.x = q.x();
+        pose.orientation.y = q.y();
+        pose.orientation.z = q.z();
+        pose.orientation.w = q.w();
+
+        pa.poses.push_back(pose);
+    }
+
+    viewpoints_pub_->publish(pa);
 }
 
 void VDBMap::generate_frontier_marker(const openvdb::BoolGrid::Ptr &grid,
